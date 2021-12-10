@@ -1,0 +1,18 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  ClusterName:
+    Default: kubeflow
+    Type: String
+Resources:
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Ref ClusterName
+
+# Outputs:
+#   RDSEndpoint:
+#     Description: RDS Endpoint
+#     Value:
+#       Fn::GetAtt:
+#         - MyDB
+#         - Endpoint.Address

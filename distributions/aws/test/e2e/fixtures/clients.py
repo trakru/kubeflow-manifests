@@ -10,6 +10,7 @@ import pytest
 
 from kubernetes import client, config
 import kfp
+import boto3
 
 from e2e.utils.constants import (
     DEFAULT_HOST,
@@ -119,3 +120,11 @@ def kfp_client(port_forward, host, client_namespace, session_cookie):
     ] = client_namespace  # needs to be set for list_experiments
 
     return client
+
+@pytest.fixture
+def cfn_client(region):
+    return boto3.client('cloudformation', region_name=region)
+
+@pytest.fixture
+def ec2_client(region):
+    return boto3.client('ec2', region_name=region)
