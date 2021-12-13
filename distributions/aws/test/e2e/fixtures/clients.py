@@ -121,10 +121,10 @@ def kfp_client(port_forward, host, client_namespace, session_cookie):
 
     return client
 
-@pytest.fixture
+@pytest.fixture(scope="class")
 def cfn_client(region):
     return boto3.client('cloudformation', region_name=region)
 
-@pytest.fixture
+@pytest.fixture(scope="class")
 def ec2_client(region):
     return boto3.client('ec2', region_name=region)

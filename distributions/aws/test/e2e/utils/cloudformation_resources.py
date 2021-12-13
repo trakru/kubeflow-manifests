@@ -1,6 +1,6 @@
 import boto3
-from e2e.config import configure_resource_fixture
-from utils import rand_name
+from e2e.utils.config import configure_resource_fixture
+from e2e.utils.utils import rand_name
 
 def create_stack(cfn_client, template_path, stack_name, params={}, capabilities=[], timeout=300, interval=10):
     with open(template_path) as file:
@@ -81,13 +81,13 @@ def create_cloudformation_fixture(metadata,
                      interval=delete_interval)
     
     resource_details = {
-        stack_name: stack_name,
-        params: params
+        'stack_name': stack_name,
+        'params': params
     }
 
     return configure_resource_fixture(metadata=metadata,
                                       request=request,
-                                      resource_details=resource_details,
+                                      resource_id=resource_details,
                                       metadata_key=metadata_key,
                                       on_create=on_create,
                                       on_delete=on_delete)
