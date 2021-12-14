@@ -69,18 +69,14 @@ Parameters:
     AllowedValues: ['true', 'false']
     ConstraintDescription: must be true or false.
 Resources:
+  MyS3Bucket:
+    Type: 'AWS::S3::Bucket'
   MyDBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: Subnets available for the RDS DB Instance
       SubnetIds:
         Ref: Subnets
-  myVPCSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for RDS DB Instance.
-      VpcId:
-        Ref: VpcId
   MyDB:
     Type: AWS::RDS::DBInstance
     Properties:
@@ -110,18 +106,6 @@ Outputs:
       Fn::GetAtt:
         - MyDB
         - Endpoint.Address
-  JDBCConnectionString:
-    Description: JDBC connection string for database
-    Value:
-      Fn::Join:
-      - ''
-      - - jdbc:mysql://
-        - Fn::GetAtt:
-          - MyDB
-          - Endpoint.Address
-        - ":"
-        - Fn::GetAtt:
-          - MyDB
-          - Endpoint.Port
-        - "/"
-        - Ref: DBName
+  S3BucketName:
+    Description: S3 bucket name
+    Value: !Ref MyS3Bucket

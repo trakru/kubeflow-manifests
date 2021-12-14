@@ -47,6 +47,8 @@ def unmarshal_yaml(yaml_file, replacements={}):
 
     return yaml.safe_load(contents)
 
+class WaitForCircuitBreakerError(Exception):
+    pass
 
 def wait_for(callback, timeout=300, interval=10):
     """
@@ -62,6 +64,8 @@ def wait_for(callback, timeout=300, interval=10):
     while True:
         try:
             return callback()
+        except WaitForCircuitBreakerError as we:
+            raise we
         except Exception as e:
             if time.time() - start >= timeout:
                 raise e
