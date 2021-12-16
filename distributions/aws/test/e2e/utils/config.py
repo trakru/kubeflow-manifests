@@ -51,7 +51,7 @@ class Metadata:
         filepath = os.path.abspath(os.path.join(METADATA_FOLDER, filename))
 
         with safe_open(filepath, "w") as file:
-            json.dump(self.params, file)
+            json.dump(self.params, file, indent=4)
 
         return filepath
 

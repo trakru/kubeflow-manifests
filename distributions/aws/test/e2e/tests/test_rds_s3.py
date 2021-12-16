@@ -1,10 +1,11 @@
 import os
+import json
 
 import pytest
 
 
 from e2e.utils.constants import DEFAULT_USER_NAMESPACE
-from e2e.utils.utils import wait_for, rand_name, WaitForCircuitBreakerError
+from e2e.utils.utils import wait_for, rand_name, WaitForCircuitBreakerError, unmarshal_yaml
 from e2e.utils.config import metadata, configure_env_file
 
 from e2e.conftest import region, get_accesskey, get_secretkey
@@ -20,8 +21,13 @@ from e2e.fixtures.clients import (
     password,
     client_namespace,
     cfn_client,
-    ec2_client
+    ec2_client,
+    s3_client,
+    create_k8s_admission_registration_api_client,
+    create_mysql_client
 )
+
+from e2e.utils import mysql
 
 from e2e.utils.cloudformation_resources import create_cloudformation_fixture, get_stack_outputs
 from e2e.utils.custom_resources import (
@@ -34,7 +40,7 @@ from kfp_server_api.exceptions import ApiException as KFPApiException
 from kubernetes.client.exceptions import ApiException as K8sApiException
 
 RDS_S3_KUSTOMIZE_MANIFEST_PATH = "../../examples/rds-s3/"
-RDS_CLOUDFORMATION_TEMPLATE_PATH = "./cloudformation-templates/rds-s3.yaml"
+RDS_CLOUDFORMATION_TEMPLATE_PATH = "./resources/cloudformation-templates/rds-s3.yaml"
 CUSTOM_RESOURCE_TEMPLATES_FOLDER = "./resources/custom-resource-templates"
 
 
@@ -44,7 +50,7 @@ def kustomize_path():
 
 
 @pytest.fixture(scope="class")
-def rds_stack(metadata, cluster, cfn_client, ec2_client, request):
+def cfn_stack(metadata, cluster, cfn_client, ec2_client, request):
     stack_name = rand_name("test-e2e-rds-stack-")
 
     resp = ec2_client.describe_vpcs(
@@ -107,8 +113,8 @@ KFP_SECRET_ENV_FILE = '../../apps/pipelines/secret.env'
 KATIB_SECRETS_ENV_FILE = '../../apps/katib-external-db-with-kubeflow/secrets.env'
 
 @pytest.fixture(scope="class")
-def configure_manifests(cfn_client, rds_stack, region, request):
-    stack_outputs = get_stack_outputs(cfn_client, rds_stack['stack_name'])
+def configure_manifests(cfn_client, cfn_stack, region, request):
+    stack_outputs = get_stack_outputs(cfn_client, cfn_stack['stack_name'])
 
     configure_env_file(
         env_file_path=KFP_MINIO_ARTIFACT_SECRET_PATCH_ENV_FILE,
@@ -131,8 +137,8 @@ def configure_manifests(cfn_client, rds_stack, region, request):
     configure_env_file(
         env_file_path=KFP_SECRET_ENV_FILE,
         env_dict={
-            'username': rds_stack['params']['DBUsername'],
-            'password': rds_stack['params']['DBPassword'],
+            'username': cfn_stack['params']['DBUsername'],
+            'password': cfn_stack['params']['DBPassword'],
         }
     )
 
@@ -142,37 +148,65 @@ def configure_manifests(cfn_client, rds_stack, region, request):
             'KATIB_MYSQL_DB_DATABASE': 'kubeflow',
             'KATIB_MYSQL_DB_HOST': stack_outputs['RDSEndpoint'],
             'KATIB_MYSQL_DB_PORT': '3306',
-            'DB_USER': rds_stack['params']['DBUsername'],
-            'DB_PASSWORD': rds_stack['params']['DBPassword'],
+            'DB_USER': cfn_stack['params']['DBUsername'],
+            'DB_PASSWORD': cfn_stack['params']['DBPassword'],
         }
     )
 
 PIPELINE_NAME = "[Demo] XGBoost - Iterative model training"
 KATIB_EXPERIMENT_FILE = "katib-experiment-random.yaml"
 
-# todo move this to util class
 def wait_for_run_succeeded(kfp_client, run, job_name, pipeline_id):
     def callback():
-        resp = kfp_client.get_run(run.id).run
+        resp = kfp_client.get_run(run.id)
 
-        assert resp.name == job_name
-        assert resp.pipeline_spec.pipeline_id == pipeline_id
+        assert resp.run.name == job_name
+        assert resp.run.pipeline_spec.pipeline_id == pipeline_id
 
-        if 'Failed' == resp.status:
-            print(resp)
+        if 'Failed' == resp.run.status:
+            print(resp.run)
             raise WaitForCircuitBreakerError('Pipeline run Failed')
 
-        assert resp.status == "Succeeded"
+        assert resp.run.status == "Succeeded"
+
+        return resp
+
+    return wait_for(callback)
+
+def wait_for_katib_experiment_succeeded(cluster, region, namespace, name):
+    def callback():
+        resp = get_katib_experiment(cluster, region, namespace, name)
+
+        assert resp["kind"] == "Experiment"
+        assert resp["metadata"]["name"] == name
+        assert resp["metadata"]["namespace"] == namespace
+
+        assert resp['status']['completionTime'] != None
+        condition_types = { condition['type'] for condition in resp['status']['conditions'] }
+
+        if 'Failed' in condition_types:
+            print(resp)
+            raise WaitForCircuitBreakerError('Katib experiment Failed')
+
+        assert 'Succeeded' in condition_types
 
     wait_for(callback)
+
+DISABLE_PIPELINE_CACHING_PATCH_FILE = './resources/custom-resource-templates/patch-disable-pipeline-caching.yaml'
 class TestRDSS3():
     @pytest.fixture(scope="class")
-    def setup(self, metadata, port_forward):
+    def setup(self, metadata, port_forward, cluster, region):
+        patch_body = unmarshal_yaml(DISABLE_PIPELINE_CACHING_PATCH_FILE)
+        k8s_admission_registration_api_client = create_k8s_admission_registration_api_client(cluster, region)
+        k8s_admission_registration_api_client.patch_mutating_webhook_configuration('cache-webhook-kubeflow', patch_body)
+
         metadata_file = metadata.to_file()
         print(metadata.params)  # These needed to be logged
         print("Created metadata file for TestRDSS3", metadata_file)
 
-    def test_kfp_experiment(self, setup, kfp_client):
+    def test_kfp_experiment(self, setup, kfp_client, cfn_stack, cfn_client):
+        stack_outputs = get_stack_outputs(cfn_client, cfn_stack['stack_name'])
+
         name = rand_name("experiment-")
         description = rand_name("description-")
         experiment = kfp_client.create_experiment(
@@ -182,6 +216,19 @@ class TestRDSS3():
         assert name == experiment.name
         assert description == experiment.description
         assert DEFAULT_USER_NAMESPACE == experiment.resource_references[0].key.id
+
+        mysql_client = create_mysql_client(
+            user=cfn_stack['params']['DBUsername'],
+            password=cfn_stack['params']['DBPassword'],
+            host=stack_outputs['RDSEndpoint'],
+            database='mlpipeline'
+        )
+
+        resp = mysql.query(mysql_client, f"select * from experiments where Name='{name}'")
+        assert len(resp) == 1
+        assert resp[0]['Name'] == experiment.name
+        assert resp[0]['Description'] == experiment.description
+        assert resp[0]['Namespace'] == experiment.resource_references[0].key.id
 
         resp = kfp_client.get_experiment(
             experiment_id=experiment.id, namespace=DEFAULT_USER_NAMESPACE
@@ -193,6 +240,9 @@ class TestRDSS3():
 
         kfp_client.delete_experiment(experiment.id)
 
+        resp = mysql.query(mysql_client, f"select * from experiments where Name='{name}'")
+        assert len(resp) == 0
+
         try:
             kfp_client.get_experiment(
                 experiment_id=experiment.id, namespace=DEFAULT_USER_NAMESPACE
@@ -201,7 +251,11 @@ class TestRDSS3():
         except KFPApiException as e:
             assert "Not Found" == e.reason
 
-    def test_run_pipeline(self, setup, kfp_client):
+        mysql_client.close()
+
+    def test_run_pipeline(self, setup, kfp_client, cfn_stack, cfn_client, s3_client):
+        stack_outputs = get_stack_outputs(cfn_client, cfn_stack['stack_name'])
+
         experiment_name = rand_name("experiment-")
         experiment_description = rand_name("description-")
         experiment = kfp_client.create_experiment(
@@ -221,11 +275,49 @@ class TestRDSS3():
         assert run.pipeline_spec.pipeline_id == pipeline_id
         assert run.status == None
 
-        wait_for_run_succeeded(kfp_client, run, job_name, pipeline_id)
+        resp = wait_for_run_succeeded(kfp_client, run, job_name, pipeline_id)
+
+        workflow_manifest_json = resp.pipeline_runtime.workflow_manifest
+        workflow_manifest = json.loads(workflow_manifest_json)
+
+        s3_artifact_keys = []
+        for _, node in workflow_manifest['status']['nodes'].items():
+            if 'outputs' not in node:
+                continue
+            if 'artifacts' not in node['outputs']:
+                continue
+
+            for artifact in node['outputs']['artifacts']:
+                if 's3' not in artifact:
+                    continue
+                s3_artifact_keys.append(artifact['s3']['key'])
+
+        bucket_objects = s3_client.list_objects_v2(Bucket=stack_outputs['S3BucketName'])
+        content_keys = {content['Key'] for content in bucket_objects['Contents']}
+
+        assert f'pipelines/{pipeline_id}' in content_keys
+        for key in s3_artifact_keys:
+            assert key in content_keys
+
+        mysql_client = create_mysql_client(
+            user=cfn_stack['params']['DBUsername'],
+            password=cfn_stack['params']['DBPassword'],
+            host=stack_outputs['RDSEndpoint'],
+            database='mlpipeline'
+        )
+
+        resp = mysql.query(mysql_client, f"select * from run_details where UUID='{run.id}'")
+
+        assert len(resp) == 1
+        assert resp[0]['DisplayName'] == job_name
+        assert resp[0]['PipelineId'] == pipeline_id
+        assert resp[0]['Conditions'] == 'Succeeded'
 
         kfp_client.delete_experiment(experiment.id)
 
-    def test_katib_experiment(self, setup, cluster, region):
+    def test_katib_experiment(self, setup, cluster, region, cfn_stack, cfn_client):
+        stack_outputs = get_stack_outputs(cfn_client, cfn_stack['stack_name'])
+
         filepath = os.path.abspath(
             os.path.join(CUSTOM_RESOURCE_TEMPLATES_FOLDER, KATIB_EXPERIMENT_FILE)
         )
@@ -242,11 +334,18 @@ class TestRDSS3():
         assert resp["metadata"]["name"] == name
         assert resp["metadata"]["namespace"] == namespace
 
-        resp = get_katib_experiment(cluster, region, namespace, name)
+        wait_for_katib_experiment_succeeded(cluster, region, namespace, name)
 
-        assert resp["kind"] == "Experiment"
-        assert resp["metadata"]["name"] == name
-        assert resp["metadata"]["namespace"] == namespace
+        mysql_client = create_mysql_client(
+            user=cfn_stack['params']['DBUsername'],
+            password=cfn_stack['params']['DBPassword'],
+            host=stack_outputs['RDSEndpoint'],
+            database='kubeflow'
+        )
+
+        resp = mysql.query(mysql_client, f"select count(*) as count from observation_logs where trial_name like '{name}%'")
+
+        assert resp[0]['count'] > 0
 
         resp = delete_katib_experiment(cluster, region, namespace, name)
 

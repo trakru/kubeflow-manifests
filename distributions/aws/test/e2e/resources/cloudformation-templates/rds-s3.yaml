@@ -15,7 +15,7 @@ Parameters:
       region in your Virtual Private Cloud (VPC)
     ConstraintDescription: Select at least two SubnetIds that are Private
   SecurityGroupId:
-    Type: 'List<AWS::EC2::SecurityGroup::Id>'
+    Type: AWS::EC2::SecurityGroup::Id
     Description: SecurityGroup Id of your EKS Worker Node
     ConstraintDescription: must be SecurityGroupId of an existing Instance
   DBName:
@@ -69,6 +69,20 @@ Parameters:
     AllowedValues: ['true', 'false']
     ConstraintDescription: must be true or false.
 Resources:
+  MySQLSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow external access to MySQL on RDS
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
   MyS3Bucket:
     Type: 'AWS::S3::Bucket'
   MyDBSubnetGroup:
@@ -97,7 +111,9 @@ Resources:
       DBSubnetGroupName:
         Ref: MyDBSubnetGroup
       VPCSecurityGroups:
-        Ref: SecurityGroupId
+        - !Ref SecurityGroupId
+        - !Ref MySQLSecurityGroup
+      PubliclyAccessible: True
     DeletionPolicy: Snapshot
 Outputs:
   RDSEndpoint:
